@@ -1,4 +1,5 @@
 import numpy as np
+import optuna
 from nnfs.datasets import spiral_data, vertical_data
 
 class DenseLayer:
@@ -176,74 +177,158 @@ class AdamOptimizer:
 
 # Create Datasets
 X_train, y_train = spiral_data(samples=100, classes=3)
+X_validate, y_validate = spiral_data(samples=100, classes=3)
 X_test, y_test = spiral_data(samples=100, classes=3)
 
-# Hyperparameters
-batch_size = 100
-epochs = 10001
+# Fixed Training Parameters
+TRAINING_BATCH_SIZE = 100
+TRAINING_EPOCHS = 10001
 
-learning_rate = 0.05
-decay = 5e-5
-momentum = 0.99
-rho = 0.999
+# Optuna Tuning Parameters
+OPTUNA_EPOCHS = 1000
+OPTUNA_TRIALS = 30
 
-weight_regularizer_l2=1e-4
-bias_regularizer_l2=1e-4
-dropout_prob = 0.1
+DEFAULT_HYPERPARAMETERS = {
+    "n_neurons": 64,
+    "learning_rate": 0.01,
+    "decay": 5e-5,
+    "momentum": 0.99,
+    "rho": 0.999,
+    "weight_regularizer_l2": 1e-4,
+    "bias_regularizer_l2": 1e-4,
+    "dropout_probability": 0.1
+}
 
-# Build Model
-dense1 = DenseLayer(2, 64, weight_regularizer_l2=weight_regularizer_l2, bias_regularizer_l2=bias_regularizer_l2)
-activation1 = ReLUActivation()
-dropout1 = DropoutLayer(dropout_prob)
-dense2 = DenseLayer(64, 3)
-loss_activation = SoftmaxCrossentropyLoss()
-optimizer = AdamOptimizer(learning_rate, decay, momentum, rho)
+def train_model_hyperparameters(X, y, X_validate, y_validate, hyperparameters, epochs):
+    n_neurons = hyperparameters["n_neurons"]
+    learning_rate = hyperparameters["learning_rate"]
+    decay = hyperparameters["decay"]
+    momentum = hyperparameters["momentum"]
+    rho = hyperparameters["rho"]
+    weight_regularizer_l2 = hyperparameters["weight_regularizer_l2"]
+    bias_regularizer_l2 = hyperparameters["bias_regularizer_l2"]
+    dropout_probability = hyperparameters["dropout_probability"]
 
-def forward_pass(X, y):
-    dense1.forward(X)
+    dense1 = DenseLayer(2, n_neurons, weight_regularizer_l2=weight_regularizer_l2, bias_regularizer_l2=bias_regularizer_l2)
+    activation1 = ReLUActivation()
+    dropout1 = DropoutLayer(dropout_probability)
+    dense2 = DenseLayer(n_neurons, 3)
+    loss_activation = SoftmaxCrossentropyLoss()
+    optimizer = AdamOptimizer(learning_rate, decay, beta1=momentum, beta2=rho)
+
+    dropout1.training = True
+
+    for epoch in range(epochs):
+        dense1.forward(X)
+        activation1.forward(dense1.outputs)
+        dropout1.forward(activation1.outputs)
+        dense2.forward(dropout1.outputs)
+        loss_activation.forward(dense2.outputs, y)
+
+        loss_activation.backward(y)
+        dense2.backward(loss_activation.dinputs)
+        dropout1.backward(dense2.dinputs)
+        activation1.backward(dropout1.dinputs)
+        dense1.backward(activation1.dinputs)
+
+        optimizer.pre_update_params()
+        optimizer.update_params(dense1)
+        optimizer.update_params(dense2)
+        optimizer.post_update_params()
+
+    dropout1.training = False
+    dense1.forward(X_validate)
     activation1.forward(dense1.outputs)
     dropout1.forward(activation1.outputs)
     dense2.forward(dropout1.outputs)
-    data_loss = loss_activation.forward(dense2.outputs, y)
-    regularization_loss = loss_activation.regularization_loss(dense1) + loss_activation.regularization_loss(dense2)
-    loss = data_loss + regularization_loss
-    accuracy = check_accuracy(dense2.outputs, y)
-    return data_loss, regularization_loss, loss, accuracy
+    validate_accuracy = check_accuracy(dense2.outputs, y_validate)
+    return validate_accuracy
 
-def backward_pass(y):
-    loss_activation.backward(y)
-    dense2.backward(loss_activation.dinputs)
-    dropout1.backward(dense2.dinputs)
-    activation1.backward(dropout1.dinputs)
-    dense1.backward(activation1.dinputs)
+def objective(trial):
+    hyperparameters = {
+        "n_neurons": trial.suggest_int("n_neurons", 16, 256),
+        "learning_rate": trial.suggest_loguniform("learning_rate", 1e-3, 0.1),
+        "decay": trial.suggest_loguniform("decay", 1e-6, 1e-2),
+        "momentum": trial.suggest_float("momentum", 0, 0.999),
+        "rho": trial.suggest_float("rho", 0, 0.9999),
+        "weight_regularizer_l2": trial.suggest_loguniform("weight_regularizer_l2", 1e-6, 1e-2),
+        "bias_regularizer_l2": trial.suggest_loguniform("bias_regularizer_l2", 1e-6, 1e-2),
+        "dropout_probability": trial.suggest_float("dropout_probability", 0, 0.5)
+    }
+    validate_accuracy = train_model_hyperparameters(X_train, y_train, X_validate, y_validate, hyperparameters, OPTUNA_EPOCHS)
+    return validate_accuracy
+
+# Hyperparameters Tuning
+study = optuna.create_study(direction="maximize")
+study.optimize(objective, n_trials=OPTUNA_TRIALS)
+print(f"Best hyperparameters: {study.best_params}")
+print(f"Best validation accuracy: {study.best_value}")
+DEFAULT_HYPERPARAMETERS.update(study.best_params)
+
+# Unpack Hyperparameters
+n_neurons = DEFAULT_HYPERPARAMETERS["n_neurons"]
+learning_rate = DEFAULT_HYPERPARAMETERS["learning_rate"]
+decay = DEFAULT_HYPERPARAMETERS["decay"]
+momentum = DEFAULT_HYPERPARAMETERS["momentum"]
+rho = DEFAULT_HYPERPARAMETERS["rho"]
+weight_regularizer_l2 = DEFAULT_HYPERPARAMETERS["weight_regularizer_l2"]
+bias_regularizer_l2 = DEFAULT_HYPERPARAMETERS["bias_regularizer_l2"]
+dropout_probability = DEFAULT_HYPERPARAMETERS["dropout_probability"]
+
+# Build Model
+dense1 = DenseLayer(2, n_neurons, weight_regularizer_l2=weight_regularizer_l2, bias_regularizer_l2=bias_regularizer_l2)
+activation1 = ReLUActivation()
+dropout1 = DropoutLayer(dropout_probability)
+dense2 = DenseLayer(n_neurons, 3)
+loss_activation = SoftmaxCrossentropyLoss()
+optimizer = AdamOptimizer(learning_rate, decay, beta1=momentum, beta2=rho)
 
 # Training
+def train_model(X, y, epochs, training=False, testing=False):
+    if training:
+        dropout1.training = True
+    
+    # Training Loop
+    for epoch in range(epochs):
+        # Forward Pass
+        dense1.forward(X)
+        activation1.forward(dense1.outputs)
+        dropout1.forward(activation1.outputs)
+        dense2.forward(dropout1.outputs)
+        data_loss = loss_activation.forward(dense2.outputs, y)
+        regularization_loss = loss_activation.regularization_loss(dense1) + loss_activation.regularization_loss(dense2)
+        loss = data_loss + regularization_loss
+        accuracy = check_accuracy(dense2.outputs, y)
+
+        if testing:
+            return accuracy, loss
+
+        if epoch % 1000 == 0:
+            print(f"Epoch {epoch} \t" +
+                f"Accuracy: {accuracy: .3f} \t" +
+                f"Loss: {loss: .3f} " +
+                f"(Data: {data_loss: .3f}  +  " +
+                f"Reg: {regularization_loss: .3f}) \t" +
+                f"lr: {optimizer.current_learning_rate: .5f}")
+
+        # Backward Pass
+        loss_activation.backward(y)
+        dense2.backward(loss_activation.dinputs)
+        dropout1.backward(dense2.dinputs)
+        activation1.backward(dropout1.dinputs)
+        dense1.backward(activation1.dinputs)
+
+        # Update Weights and Biases
+        optimizer.pre_update_params()
+        optimizer.update_params(dense1)
+        optimizer.update_params(dense2)
+        optimizer.post_update_params()
+
 print("Training")
-dropout1.training = True
-for epoch in range(epochs):
-    data_loss, regularization_loss, loss, accuracy = forward_pass(X_train, y_train)
-
-    if epoch % 1000 == 0:
-        print(f"Epoch {epoch} \t" +
-              f"Accuracy: {accuracy: .3f} \t" +
-              f"Loss: {loss: .3f} " +
-              f"(Data: {data_loss: .3f}  +  " +
-              f"Reg: {regularization_loss: .3f}) \t" +
-              f"lr: {optimizer.current_learning_rate: .3f}")
-        
-    backward_pass(y_train)
-
-    optimizer.pre_update_params()
-    optimizer.update_params(dense1)
-    optimizer.update_params(dense2)
-    optimizer.post_update_params()
+train_model(X_train, y_train, TRAINING_EPOCHS, training=True)
 
 # Testing
-dropout1.training = False
-data_loss, regularization_loss, loss, accuracy = forward_pass(X_test, y_test)
-
+testing_accuracy, testing_loss = train_model(X_test, y_test, 1, testing=True)
 print("\033[31mTesting \t\033[0m" +
-      f"Accuracy: {accuracy: .3f} \t" +
-      f"Loss: {loss: .3f} " +
-      f"(Data: {data_loss: .3f}  +  " +
-      f"Reg: {regularization_loss: .3f}) \t")
+      f"Accuracy: {testing_accuracy: .3f} \t" +
+      f"Loss: {testing_loss: .3f}")
